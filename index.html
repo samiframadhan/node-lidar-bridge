@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LIDAR Visualization</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0a0a0a;
+            color: #ffffff;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+
+        #container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #info-panel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            min-width: 250px;
+            backdrop-filter: blur(5px);
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+
+        .label {
+            color: #888;
+        }
+
+        .value {
+            color: #0ff;
+            font-weight: bold;
+        }
+
+        #status {
+            color: #0f0;
+        }
+
+        .disconnected {
+            color: #f00 !important;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            backdrop-filter: blur(5px);
+        }
+
+        .control-row {
+            margin: 5px 0;
+            display: flex;
+            align-items: center;
+        }
+
+        .control-row label {
+            margin-right: 10px;
+            min-width: 80px;
+        }
+
+        input[type="range"] {
+            width: 150px;
+        }
+
+        button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 2px;
+        }
+
+        button:hover {
+            background: #444;
+        }
+
+        button.active {
+            background: #0ff;
+            color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="lidar-canvas"></canvas>
+        
+        <div id="info-panel">
+            <h3 style="margin-top: 0; color: #0ff;">LIDAR Scanner</h3>
+            <div class="info-row">
+                <span class="label">Status:</span>
+                <span class="value" id="status">Connecting...</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Points:</span>
+                <span class="value" id="point-count">0</span>
+            </div>
+            <div class="info-row">
+                <span class="label">FPS:</span>
+                <span class="value" id="fps">0</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Range:</span>
+                <span class="value" id="max-distance">0.0m</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Update Rate:</span>
+                <span class="value" id="update-rate">0 Hz</span>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-row">
+                <label>Scale:</label>
+                <input type="range" id="scale-slider" min="10" max="200" value="50">
+                <span id="scale-value">50</span>
+            </div>
+            <div class="control-row">
+                <label>Point Size:</label>
+                <input type="range" id="point-size-slider" min="1" max="10" value="2">
+                <span id="point-size-value">2</span>
+            </div>
+            <div class="control-row">
+                <button id="pause-btn">Pause</button>
+                <button id="clear-btn">Clear</button>
+                <button id="center-btn">Center</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.2/pixi.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/msgpack5/6.0.2/msgpack5.min.js"></script>
+
+    <script>
+        class LidarVisualizer {
+            constructor() {
+                this.app = null;
+                this.socket = null;
+                this.pointGraphics = null;
+                this.gridGraphics = null;
+                
+                // Visualization state
+                this.isPaused = false;
+                this.scale = 50;
+                this.pointSize = 2;
+                this.maxDistance = 0;
+                this.lastUpdate = 0;
+                this.frameCount = 0;
+                this.fps = 0;
+                this.updateRate = 0;
+                this.lastDataTime = 0;
+                
+                // Data buffers
+                this.currentPoints = [];
+                
+                this.init();
+            }
+
+            async init() {
+                await this.initPixi();
+                this.initSocket();
+                this.initMsgPack();
+                this.setupControls();
+                this.startRenderLoop();
+            }
+
+            async initPixi() {
+                // Create PIXI application
+                this.app = new PIXI.Application({
+                    view: document.getElementById('lidar-canvas'),
+                    width: window.innerWidth,
+                    height: window.innerHeight,
+                    backgroundColor: 0x0a0a0a,
+                    antialias: true,
+                    resolution: window.devicePixelRatio || 1,
+                    autoDensity: true
+                });
+
+                // Create graphics objects
+                this.gridGraphics = new PIXI.Graphics();
+                this.pointGraphics = new PIXI.Graphics();
+                
+                this.app.stage.addChild(this.gridGraphics);
+                this.app.stage.addChild(this.pointGraphics);
+
+                // Position at center
+                this.centerView();
+                
+                // Draw initial grid
+                this.drawGrid();
+
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    this.app.renderer.resize(window.innerWidth, window.innerHeight);
+                    this.centerView();
+                    this.drawGrid();
+                });
+            }
+
+            initSocket() {
+                this.socket = io();
+
+                this.socket.on('connect', () => {
+                    this.updateStatus('Connected', false);
+                });
+
+                this.socket.on('disconnect', () => {
+                    this.updateStatus('Disconnected', true);
+                });
+
+                this.socket.on('lidar_scan', (data) => {
+                    if (!this.isPaused) {
+                        this.processLidarData(data);
+                    }
+                });
+
+                this.socket.on('status', (data) => {
+                    console.log('Bridge status:', data.message);
+                });
+            }
+
+            initMsgPack() {
+                this.msgpack = msgpack5();
+            }
+
+            setupControls() {
+                // Scale control
+                const scaleSlider = document.getElementById('scale-slider');
+                const scaleValue = document.getElementById('scale-value');
+                scaleSlider.addEventListener('input', (e) => {
+                    this.scale = parseInt(e.target.value);
+                    scaleValue.textContent = this.scale;
+                });
+
+                // Point size control
+                const pointSizeSlider = document.getElementById('point-size-slider');
+                const pointSizeValue = document.getElementById('point-size-value');
+                pointSizeSlider.addEventListener('input', (e) => {
+                    this.pointSize = parseInt(e.target.value);
+                    pointSizeValue.textContent = this.pointSize;
+                });
+
+                // Pause button
+                document.getElementById('pause-btn').addEventListener('click', (e) => {
+                    this.isPaused = !this.isPaused;
+                    e.target.textContent = this.isPaused ? 'Resume' : 'Pause';
+                    e.target.classList.toggle('active', this.isPaused);
+                });
+
+                // Clear button
+                document.getElementById('clear-btn').addEventListener('click', () => {
+                    this.clearPoints();
+                });
+
+                // Center button
+                document.getElementById('center-btn').addEventListener('click', () => {
+                    this.centerView();
+                });
+            }
+
+            centerView() {
+                const centerX = this.app.screen.width / 2;
+                const centerY = this.app.screen.height / 2;
+                
+                this.gridGraphics.position.set(centerX, centerY);
+                this.pointGraphics.position.set(centerX, centerY);
+            }
+
+            drawGrid() {
+                this.gridGraphics.clear();
+                
+                const centerX = 0;
+                const centerY = 0;
+                const maxRadius = Math.min(this.app.screen.width, this.app.screen.height) / 2 - 50;
+                
+                // Draw concentric circles (range rings)
+                this.gridGraphics.lineStyle(1, 0x333333, 0.5);
+                for (let r = this.scale; r <= maxRadius; r += this.scale) {
+                    this.gridGraphics.drawCircle(centerX, centerY, r);
+                }
+                
+                // Draw cross hairs
+                this.gridGraphics.lineStyle(1, 0x555555, 0.7);
+                this.gridGraphics.moveTo(-maxRadius, centerY).lineTo(maxRadius, centerY);
+                this.gridGraphics.moveTo(centerX, -maxRadius).lineTo(centerX, maxRadius);
+                
+                // Draw angle lines every 30 degrees
+                this.gridGraphics.lineStyle(1, 0x333333, 0.3);
+                for (let angle = 0; angle < 360; angle += 30) {
+                    const rad = (angle * Math.PI) / 180;
+                    const x = Math.cos(rad) * maxRadius;
+                    const y = Math.sin(rad) * maxRadius;
+                    this.gridGraphics.moveTo(centerX, centerY).lineTo(x, y);
+                }
+                
+                // Draw center point
+                this.gridGraphics.beginFill(0x00ffff, 0.8);
+                this.gridGraphics.drawCircle(centerX, centerY, 3);
+                this.gridGraphics.endFill();
+            }
+
+            processLidarData(data) {
+                if (!data || !data.points || !(data.points instanceof ArrayBuffer)) {
+                    console.warn('Received invalid or missing LIDAR data payload.', data);
+                    return;
+                }
+
+                try {
+                    const decodedPoints = this.msgpack.decode(new Uint8Array(data.points));
+
+                    if (!Array.isArray(decodedPoints)) {
+                        console.warn('Decoded data is not an array:', decodedPoints);
+                        return;
+                    }
+
+                    // ADAPT to the new array-based data structure
+                    const validPoints = decodedPoints
+                        .map((point, index) => ({
+                            // Calculate angle based on the point's index in the scan
+                            angle: (index / decodedPoints.length) * Math.PI * 2,
+                            
+                            // Distance is the second element (index 1) in the inner array
+                            distance: point[1],
+                            
+                            // Assume quality is the third element (index 2)
+                            quality: point[2]
+                        }))
+                        .filter(point => {
+                            // This validation logic remains the same and will now work correctly
+                            const hasAngle = typeof point.angle === 'number' && !isNaN(point.angle);
+                            const hasDistance = typeof point.distance === 'number' && !isNaN(point.distance) && point.distance > 0;
+                            return hasAngle && hasDistance;
+                        });
+                    
+                    if (validPoints.length === 0) {
+                        console.warn('No valid points found after mapping and filtering.');
+                        console.log('Raw decoded points:', decodedPoints); // For debugging
+                        return;
+                    }
+                    
+                    this.currentPoints = validPoints;
+                    
+                    this.updateStats(data);
+                    
+                    this.maxDistance = Math.max(...validPoints.map(p => p.distance));
+                    
+                } catch (error) {
+                    console.error('Error processing LIDAR data:', error);
+                }
+            }
+
+
+            updateStats(data) {
+                // Update point count
+                document.getElementById('point-count').textContent = data.pointCount;
+                
+                // Update max distance
+                document.getElementById('max-distance').textContent = this.maxDistance.toFixed(1) + 'm';
+                
+                // Calculate update rate
+                const now = Date.now();
+                if (this.lastDataTime > 0) {
+                    const timeDiff = (now - this.lastDataTime) / 1000;
+                    this.updateRate = Math.round(1 / timeDiff);
+                }
+                this.lastDataTime = now;
+                document.getElementById('update-rate').textContent = this.updateRate + ' Hz';
+            }
+
+            renderPoints() {
+                this.pointGraphics.clear();
+                
+                if (this.currentPoints.length === 0) return;
+                
+                // Color based on quality/distance
+                for (const point of this.currentPoints) {
+                    // Convert to screen coordinates
+                    const screenDistance = point.distance * this.scale;
+                    const x = Math.cos(point.angle) * screenDistance;
+                    const y = Math.sin(point.angle) * screenDistance;
+                    
+                    // Color coding: closer = more red, farther = more blue
+                    const normalizedDistance = Math.min(point.distance / 6.0, 1.0); // Assume 6m max
+                    const red = Math.floor(255 * (1 - normalizedDistance));
+                    const blue = Math.floor(255 * normalizedDistance);
+                    const green = Math.floor(128 * (point.quality / 255));
+                    
+                    const color = (red << 16) | (green << 8) | blue;
+                    
+                    // Draw point
+                    this.pointGraphics.beginFill(color, 0.8);
+                    this.pointGraphics.drawCircle(x, y, this.pointSize);
+                    this.pointGraphics.endFill();
+                }
+            }
+
+            clearPoints() {
+                this.currentPoints = [];
+                this.pointGraphics.clear();
+            }
+
+            updateStatus(status, isError) {
+                const statusElement = document.getElementById('status');
+                statusElement.textContent = status;
+                statusElement.className = isError ? 'value disconnected' : 'value';
+            }
+
+            startRenderLoop() {
+                const render = () => {
+                    // Calculate FPS
+                    const now = performance.now();
+                    this.frameCount++;
+                    if (now - this.lastUpdate >= 1000) {
+                        this.fps = Math.round(this.frameCount / ((now - this.lastUpdate) / 1000));
+                        document.getElementById('fps').textContent = this.fps;
+                        this.frameCount = 0;
+                        this.lastUpdate = now;
+                    }
+                    
+                    // Render points
+                    this.renderPoints();
+                    
+                    requestAnimationFrame(render);
+                };
+                
+                render();
+            }
+        }
+
+        // Initialize the visualizer when page loads
+        window.addEventListener('load', () => {
+            new LidarVisualizer();
+        });
+    </script>
+</body>
+</html>
