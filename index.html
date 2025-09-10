@@ -320,6 +320,17 @@
                 this.gridGraphics.beginFill(0x00ffff, 0.8);
                 this.gridGraphics.drawCircle(centerX, centerY, 3);
                 this.gridGraphics.endFill();
+
+                // Draw safe zone rectangle (for example: 2m x 1m area)
+                const safeZoneWidth = 1 * this.scale;  // 2 meters
+                const safeZoneHeight = 2 * this.scale; // 1 meter
+                this.gridGraphics.lineStyle(2, 0x00ff00, 0.8);
+                this.gridGraphics.drawRect(
+                    centerX - safeZoneWidth / 2,
+                    centerY - safeZoneHeight,
+                    safeZoneWidth,
+                    safeZoneHeight
+                );
             }
 
             processLidarData(data) {
@@ -340,8 +351,9 @@
                     const validPoints = decodedPoints
                         .map((point, index) => ({
                             // Calculate angle based on the point's index in the scan
-                            angle: (index / decodedPoints.length) * Math.PI * 2,
-                            
+                            // angle: (index / decodedPoints.length) * Math.PI * 2,
+                            angle: -point[0] - (Math.PI / 2),
+
                             // Distance is the second element (index 1) in the inner array
                             distance: point[1],
                             
